@@ -1,0 +1,358 @@
+# Digital Banking & Payments – Microservices System Design
+
+> A hands-on blueprint for building a production-grade, polyglot, event-driven banking platform with Spring Boot.
+
+---
+
+## 1) Goals & Non‑Functional Requirements
+
+* **Domain**: Retail banking + payments (accounts, wallet, transfers, bill pay, merchant payouts).
+* **Scale**: 1–10K RPS, spikes during payroll & bill cycles.
+* **Latency**: P99 < 300 ms for reads, < 800 ms for write paths that touch risk & orchestration.
+* **Reliability**: 99.9%+; zero money loss, no double-spend.
+* **Consistency**: Business-level atomicity via sagas; ledger is the source of truth.
+* **Security & Compliance**: OAuth2.1/OIDC, mTLS, data encryption (KMS), PCI scope minimization, audit.
+* **Operability**: Observability, blue–green deploys, feature flags, canary.
+
+---
+
+## 2) High-Level Architecture (ASCII)
+
+```
+                          +-------------------+           +-------------------+
+   Mobile/Web/3P Clients  |   API Gateway     |  -> mTLS  |  Auth/Identity    |
+        (Swagger UI) ---> | (Spring Cloud GW) | <-------> | (Keycloak / Cognito)
+                          +---------+---------+           +----------+--------+
+                                    |                               |
+                                    | JWT/OAuth2                     |
+                                    v                               v
+                           +--------+-------------------------------+------+
+                           |            Domain Microservices               |
+                           |                                               |
+   +----------------+   +---------------+  +-----------------+  +---------------+
+   | Customer Svc   |   | Accounts Svc  |  |  Payments Svc   |  |  Wallet Svc   |
+   | (Profile/KYC)  |   | (IBAN/Acct#)  |  | (Orchestration) |  | (Prepaid)     |
+   +-------+--------+   +-------+-------+  +--------+--------+  +-------+-------+
+           |                    |                    |                   |
+           v                    v                    v                   v
+   +-------+--------+   +-------+-------+   +--------+--------+   +------+------+
+   | Risk/Fraud Svc |   | Ledger Svc     |  | BillPay/Merchant |   | FX/Fees Svc |
+   | (Scoring)      |   | (Double-entry) |  | Payouts Svc      |   |             |
+   +-------+--------+   +-------+-------+   +--------+--------+   +------+------+
+           |                    |                    |                   |
+           v                    v                    v                   v
+   +------------------+  +-------------+   +-----------------+   +----------------+
+   | Kafka/MSK Topics |  | Redis Cache |   | Search (ES/Opn) |   | Notifications  |
+   | (events / sagas) |  | & Idempotency|  | Audit & Queries |   | (Email/SMS/FCM)|
+   +------------------+  +-------------+   +-----------------+   +----------------+
+
+   Data plane (polyglot persistence):
+   - Accounts -> PostgreSQL
+   - Ledger -> Cassandra/PostgreSQL (append-only, partitioned) + Kafka log
+   - Risk/Fraud -> MongoDB (+ Redis features store)
+   - Wallet -> DynamoDB (or Mongo) for high write fan-out
+   - BillPay/Merchant -> PostgreSQL
+   - Search/Audit -> Elasticsearch/OpenSearch (from CDC)
+```
+
+---
+
+## 3) Bounded Contexts & Responsibilities
+
+1. **Auth/Identity**: Users, clients, roles, OAuth2/OIDC; passwordless/OTP optional.
+2. **Customer**: KYC, profiles, addresses, contact; immutable audit trail.
+3. **Accounts**: Create/close accounts, balances (eventual from ledger), limits.
+4. **Ledger**: Double-entry postings; canonical source of balances; immutable journal.
+5. **Payments**: Orchestrates transfers, bill pay, merchant payouts; sagas, retries, idempotency keys.
+6. **Wallet**: Prepaid wallet, hold/release, cashback.
+7. **BillPay/Merchant**: External billers/merchants, payouts, settlement windows (T+1…T+3).
+8. **Risk/Fraud**: Real-time scoring, velocity checks, block/allow decisions; rules + ML-ready.
+9. **FX/Fees**: Currency conversion, fee calculation, tax.
+10. **Notifications**: Email/SMS/Push; async fan-out.
+11. **Reporting/Audit/Search**: Read-optimized store fed by CDC.
+
+---
+
+## 4) Polyglot Persistence (per service)
+
+* **Accounts (PostgreSQL)**: strong relational constraints, transactions, indexes on account\_number, status.
+* **Ledger (Cassandra or Postgres partitioned)**: write-heavy append-only; partition by account\_id + month; TTL disabled; read via materialized views or queries.
+* **Risk (MongoDB)**: flexible schemas for device fingerprints, rules; hot features in **Redis**.
+* **Wallet (DynamoDB/MongoDB)**: key-value access by wallet\_id; conditional updates for optimistic concurrency.
+* **BillPay/Merchant (PostgreSQL)**: ACID around mandates, payouts, settlements.
+* **Idempotency Store (Redis)**: idempotency-key -> result hash with expiry.
+* **Search/Audit (Elasticsearch/OpenSearch)**: denormalized views for statements, investigations.
+
+> All PII at rest encrypted (KMS), secrets in Vault/Secrets Manager, TLS in transit.
+
+---
+
+## 5) Messaging & Patterns
+
+* **Broker**: Kafka (MSK) with 3–5 partitions per hot topic to start.
+* **Topics** (event types → subscribers):
+
+  * `payments.requested` → Risk, Ledger, Wallet
+  * `payments.authorized` → Ledger (post), Notifications
+  * `payments.settled` → Accounts (projector), Reporting
+  * `ledger.posted` → Accounts projector, Search indexer
+  * `kyc.verified` → Accounts (enable), Risk (features)
+* **Patterns**: Saga orchestration (Payments Svc as orchestrator), Outbox pattern (Debezium/CDC), Idempotent consumers, Retry with DLQs.
+
+---
+
+## 6) API Design (sample)
+
+### Gateway
+
+* `POST /v1/payments` (Idempotency-Key header required)
+* `GET /v1/accounts/{id}/balance`
+* `GET /v1/accounts/{id}/transactions?from=..&to=..&page=..`
+
+### Accounts Service
+
+* `POST /internal/accounts` → create (after KYC)
+* `GET /internal/accounts/{id}`
+
+### Payments Service
+
+* `POST /internal/payments/transfers` → {fromAccount, toAccount, amount, currency, reference}
+* `POST /internal/payments/billpay` → {account, billerId, amount}
+* `POST /internal/payments/refund` → {origPaymentId, amount}
+
+Headers: `Authorization: Bearer <JWT>`, `Idempotency-Key: <uuid>`.
+
+---
+
+## 7) Data Models (starter schemas)
+
+### Accounts (PostgreSQL)
+
+```
+accounts(id PK, account_number UNIQUE, customer_id, status, created_at, updated_at)
+account_limits(account_id FK, daily_limit, per_txn_limit, currency)
+```
+
+### Ledger (Cassandra/Postgres)
+
+```
+ledger_journal(
+  journal_id, account_id, posting_ts, currency, amount_minor,
+  side CHECK(debit|credit), correlation_id, payment_id, narrative
+)
+-- Derive balances by summing; or maintain materialized balances table with OCC.
+```
+
+### Payments (PostgreSQL)
+
+```
+payments(id, from_account, to_account, amount_minor, currency, status,
+         idempotency_key UNIQUE, created_at, updated_at)
+```
+
+### Risk (Mongo)
+
+* `risk_events`: {paymentId, deviceId, ip, velocity, rulesMatched, score, decision}
+* `features`: {accountId, counters, lastDevice, violations}
+
+### Wallet (DynamoDB/Mongo)
+
+* PK: `wallet_id`, attributes: balance\_minor, hold\_minor, version; conditional updates.
+
+---
+
+## 8) Critical Flows (Sequences)
+
+### A) Account-to-Account Transfer
+
+1. **Client** → Gateway: `POST /v1/payments` with Idempotency-Key.
+2. **Payments Svc** persists payment with `PENDING` + outbox.
+3. **Risk/Fraud** consumes `payments.requested`, returns `ALLOW`/`REVIEW`/`BLOCK` event.
+4. If **ALLOW** → Payments publishes `payments.authorized`.
+5. **Ledger Svc** consumes `payments.authorized` and performs **double-entry**: debit source, credit dest (atomic in ledger DB). Emits `ledger.posted`.
+6. **Accounts Projector** updates materialized balances (eventually consistent).
+7. **Payments Svc** marks `SETTLED`; Notifications fire.
+8. **Idempotency** ensures duplicate client retries map to the original result.
+
+### B) Bill Payment
+
+* Payments orchestrates mandate validation → risk → ledger debit → external biller adapter → settle; compensates on failure (refund credit).
+
+---
+
+## 9) Consistency, Concurrency & Money Safety
+
+* **Never** 2PC across services. Use **sagas + outbox**.
+* **Ledger** is the **single source of truth**; balances are projections.
+* Use **optimistic concurrency** on balance projections (version column) and **rebuild** from journal on drift.
+* **Idempotency Keys** on all payment writes; **Idempotent Consumers** in Kafka (dedupe by `correlation_id`).
+* **Exactly-once business effect** via outbox + OCC (not Kafka EO processing).
+
+---
+
+## 10) Security & Compliance
+
+* OAuth2.1/OIDC with **Keycloak** (or Cognito); fine-grained scopes (`payments:write`, `accounts:read`).
+* mTLS between services; JWT audience/issuer checks.
+* PII encryption at rest; field-level crypto for PAN/token (if any). Prefer tokenized PAN via external vault (Stripe/Razorpay) to **avoid PCI scope**.
+* **Audit** every sensitive read/write (stream into immutable store).
+
+---
+
+## 11) Observability
+
+* **OpenTelemetry** instrumentation; send traces to **Tempo/Zipkin/Jaeger**.
+* **Prometheus** metrics; **Grafana** dashboards (p95 latency, failure rates, saga steps, backlog depth).
+* **Structured logging** (JSON) with correlation IDs propagated.
+
+---
+
+## 12) Deployment & Infra (AWS-flavored)
+
+* **EKS** (Kubernetes) or ECS/Fargate for services.
+* **RDS Postgres** (Accounts/BillPay), **MSK Kafka**, **ElastiCache Redis**, **DocumentDB/Mongo Atlas**, **Keyspaces/Cassandra** or RDS partitioned.
+* **OpenSearch** for search/audit; **S3** for cold storage & ledger snapshots.
+* **AWS KMS**, **Secrets Manager**; **WAF + CloudFront** in front of gateway.
+* **Blue–Green/Canary** via Argo Rollouts.
+
+---
+
+## 13) CI/CD & Repo Structure
+
+### Option A: Monorepo
+
+```
+/banking-platform
+  /gateway
+  /services
+    /accounts-service
+    /payments-service
+    /ledger-service
+    /wallet-service
+    /risk-service
+    /notifications-service
+  /libs (shared DTOs, error models)
+  /deploy (helm charts, k8s manifests)
+  /ops (grafana dashboards, prom rules)
+  /docker-compose (local stack)
+```
+
+### CI/CD
+
+* GitHub Actions: build → unit tests → integration tests (Testcontainers) → image build → Helm deploy to dev.
+* Migrations via **Flyway** (SQL) per service.
+
+---
+
+## 14) Local Dev Environment (Docker Compose)
+
+Spin up: Postgres, Mongo, Redis, Kafka/ZooKeeper (or Redpanda), OpenSearch+Kibana, Keycloak, Zipkin.
+
+**Compose services**: `postgres`, `mongo`, `redis`, `kafka`, `schema-registry` (optional), `keycloak`, `zipkin`, `opensearch`, `kibana`.
+
+Each microservice has a `spring-profile=local` pointed to compose endpoints.
+
+---
+
+## 15) Testing Strategy
+
+* **Unit**: domain logic, validators.
+* **Component**: REST controllers with MockMvc; Repos with embedded DB.
+* **Integration**: Testcontainers for Postgres/Mongo/Redpanda; Kafka tests with embedded cluster.
+* **Contract**: Spring Cloud Contract between services.
+* **E2E**: orchestration of a payment happy-path + failure/compensation paths.
+* **Chaos**: inject failures (latency, broker down, partial success) to validate sagas.
+
+---
+
+## 16) Incremental Delivery Plan (Milestones)
+
+**M1 – Foundations**
+
+* Gateway, Auth (Keycloak), Accounts (Postgres), Ledger (Postgres), Payments (saga skeleton), Kafka, Redis, Observability baseline.
+
+**M2 – Transfers MVP**
+
+* A2A transfer flow end-to-end with idempotency, outbox, ledger postings, notifications, statements projection.
+
+**M3 – Wallet & BillPay**
+
+* Wallet service (Dynamo/Mongo), bill pay adapters (mock), settlements, refunds.
+
+**M4 – Risk/Fraud**
+
+* Real-time rules (velocity, device), allow/block; feature store in Redis, events to Kafka.
+
+**M5 – Search/Audit & Reporting**
+
+* CDC to OpenSearch; investigators’ queries; export statements.
+
+**M6 – Hardening**
+
+* Rate limiting, throttling, circuit breakers, canary; chaos tests; GDPR/PURGE tooling.
+
+---
+
+## 17) Spring Boot Implementation Notes
+
+* Use **Spring Boot 3.x**, Java 21.
+* **Spring Cloud**: Gateway, OpenFeign, Resilience4j, Sleuth/Otel.
+* **JPA** (Accounts/BillPay), **Spring Data Mongo** (Risk), **Spring Data Cassandra** (Ledger if Cassandra), **Spring Kafka**.
+* **Outbox**: transactional outbox table per service + Debezium → Kafka.
+* **Idempotency Filter**: WebFilter reading `Idempotency-Key` + Redis cache.
+* **DTOs**: versioned (`v1`) with strict validation.
+
+---
+
+## 18) Example: Idempotent Payment Endpoint (Contract)
+
+```
+POST /v1/payments
+Headers:
+  Authorization: Bearer <jwt>
+  Idempotency-Key: <uuid-v4>
+Body:
+  {
+    "fromAccount": "ACCT-001",
+    "toAccount": "ACCT-002",
+    "amountMinor": 125000,
+    "currency": "INR",
+    "reference": "Rent Aug"
+  }
+Responses:
+  202 Accepted { paymentId, status: "PENDING" }
+  200 OK       { paymentId, status: "SETTLED" } (on retry)
+  409 Conflict  { error: "Duplicate with different payload" }
+```
+
+---
+
+## 19) What to Build First (Hands-on Checklist)
+
+* [ ] Create GitHub **org**/repo skeleton (monorepo).
+* [ ] Add **docker-compose** for infra.
+* [ ] Scaffold `gateway`, `auth-bootstrap`, `accounts-service`, `ledger-service`, `payments-service`.
+* [ ] Implement **Accounts** (CRUD + limits) + Flyway.
+* [ ] Implement **Ledger** (double-entry journal) + REST to post entries.
+* [ ] Implement **Payments** saga (pending → authorized → settled) using Kafka.
+* [ ] Add **Idempotency** filter + Redis.
+* [ ] Add **Observability** (Otel + Zipkin) and **health checks**.
+* [ ] E2E test: transfer ₹100 from A→B with idempotency and retries.
+
+---
+
+## 20) Stretch Ideas
+
+* **UPI-like** collect/pay flow with VPA mapping service.
+* **Virtual Accounts** for merchants (auto-reconciliation).
+* **Ledger snapshotting** to S3; periodic balance verification jobs.
+* **ML fraud**: train off Kafka topics; deploy feature pipelines.
+
+---
+
+### Appendix: Failure/Compensation Examples
+
+* If ledger debit succeeds but credit fails → publish `compensation.debit_reversal` to re-credit source.
+* If external biller fails after debit → orchestrate refund via ledger credit with `correlation_id` linking.
+
+---
