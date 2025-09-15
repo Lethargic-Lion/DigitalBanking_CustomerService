@@ -1,7 +1,7 @@
 package com.example.customer_service.service_impl;
 
-import com.example.customer_service.dto.CustomerRequest;
-import com.example.customer_service.dto.CustomerResponse;
+import com.example.customer_service.dto.CustomerDto;
+import com.example.customer_service.exception.DuplicateResourceException;
 import com.example.customer_service.exception.ResourceNotFoundException;
 import com.example.customer_service.model.Customer;
 import com.example.customer_service.repository.CustomerRepository;
@@ -19,7 +19,10 @@ public class CustomerServiceImpl implements CustomerService {
     CustomerRepository repository;
 
     @Override
-    public CustomerResponse createCustomer(CustomerRequest request) {
+    public CustomerDto createCustomer(CustomerDto request) {
+        if(repository.existsByEmail(request.getEmail())) {
+            throw new DuplicateResourceException("Email already in use: " + request.getEmail());
+        }
         Customer customer = Customer.builder()
                 .fullName(request.getFullName())
                 .email(request.getEmail())
@@ -31,7 +34,7 @@ public class CustomerServiceImpl implements CustomerService {
     }
 
     @Override
-    public List<CustomerResponse> getAllCustomers() {
+    public List<CustomerDto> getAllCustomers() {
         return repository.findAll()
                 .stream()
                 .map(this::mapToResponse)
@@ -39,14 +42,14 @@ public class CustomerServiceImpl implements CustomerService {
     }
 
     @Override
-    public CustomerResponse getCustomerById(Long id) {
+    public CustomerDto getCustomerById(Long id) {
         Customer customer = repository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Customer not found with id: " + id));
         return mapToResponse(customer);
     }
 
     @Override
-    public CustomerResponse updateCustomer(Long id, CustomerRequest request) {
+    public CustomerDto updateCustomer(Long id, CustomerDto request) {
         Customer customer = repository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Customer not found with id: " + id));
 
@@ -58,8 +61,8 @@ public class CustomerServiceImpl implements CustomerService {
         return mapToResponse(updated);
     }
 
-    private CustomerResponse mapToResponse(Customer customer) {
-        return CustomerResponse.builder()
+    private CustomerDto mapToResponse(Customer customer) {
+        return CustomerDto.builder()
                 .id(customer.getId())
                 .fullName(customer.getFullName())
                 .email(customer.getEmail())

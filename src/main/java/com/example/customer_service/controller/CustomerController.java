@@ -1,8 +1,7 @@
 package com.example.customer_service.controller;
 
 
-import com.example.customer_service.dto.CustomerRequest;
-import com.example.customer_service.dto.CustomerResponse;
+import com.example.customer_service.dto.CustomerDto;
 import com.example.customer_service.service.CustomerService;
 import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,22 +17,22 @@ public class CustomerController {
     CustomerService service;
 
     @PostMapping
-    public CustomerResponse create(@Valid @RequestBody CustomerRequest request) {
+    public CustomerDto create(@Valid @RequestBody CustomerDto request) {
         return service.createCustomer(request);
     }
 
     @GetMapping
-    public List<CustomerResponse> getAll() {
+    public List<CustomerDto> getAll() {
         return service.getAllCustomers();
     }
 
     @GetMapping("/{id}")
-    public CustomerResponse getById(@PathVariable Long id) {
+    public CustomerDto getById(@PathVariable Long id) {
         return service.getCustomerById(id);
     }
 
     @PutMapping("/{id}")
-    public CustomerResponse update(@PathVariable Long id, @Valid @RequestBody CustomerRequest request) {
+    public CustomerDto update(@PathVariable Long id, @Valid @RequestBody CustomerDto request) {
         return service.updateCustomer(id, request);
     }
 }

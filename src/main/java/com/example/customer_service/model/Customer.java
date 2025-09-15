@@ -10,7 +10,7 @@ import java.time.LocalDateTime;
 @AllArgsConstructor
 @NoArgsConstructor
 @Builder
-@Table(name = "customers")
+@Table(name = "customers" , schema = "customer_service")
 public class Customer {
 
     @Id
@@ -22,8 +22,10 @@ public class Customer {
     @Column(unique = true, nullable = false)
     private String email;
 
+    @Column(nullable = false, unique = true, length = 10)
     private String phone;
 
+    @Column(nullable = false)
     private String address;
 
     @Enumerated(EnumType.STRING)

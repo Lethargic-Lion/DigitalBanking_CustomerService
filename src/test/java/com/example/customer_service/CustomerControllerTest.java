@@ -1,8 +1,7 @@
 package com.example.customer_service;
 
 import com.example.customer_service.controller.CustomerController;
-import com.example.customer_service.dto.CustomerRequest;
-import com.example.customer_service.dto.CustomerResponse;
+import com.example.customer_service.dto.CustomerDto;
 import com.example.customer_service.enums.KycStatus;
 import com.example.customer_service.service.CustomerService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -13,14 +12,12 @@ import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
-import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.Arrays;
 import java.util.List;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -47,9 +44,9 @@ class CustomerControllerTest {
 
     @Test
     void testGetAllCustomers() throws Exception {
-        List<CustomerResponse> responses = Arrays.asList(
-                new CustomerResponse(1L, "John Doe", "john.doe@example.com", "7894561230", "Bengaluru", KycStatus.PENDING),
-                new CustomerResponse(2L, "JaneSmith", "jane.smith@example.com" , "1234567890", "New York", KycStatus.REJECTED)
+        List<CustomerDto> responses = Arrays.asList(
+                new CustomerDto(1L, "John Doe", "john.doe@example.com", "7894561230", "Bengaluru", KycStatus.PENDING),
+                new CustomerDto(2L, "JaneSmith", "jane.smith@example.com" , "1234567890", "New York", KycStatus.REJECTED)
         );
 
         Mockito.when(customerService.getAllCustomers()).thenReturn(responses);
